@@ -33,5 +33,11 @@ Linux packaging is performed to Debian and Arch based distros. Notes can be
 
 ## Contributors
 
-<!-- CONTRIBUTORS:START -->
-<!-- CONTRIBUTORS:END -->
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
