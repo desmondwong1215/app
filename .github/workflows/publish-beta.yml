@@ -1,0 +1,565 @@
+name: Build and release Git-Mastery beta CLI
+
+on:
+  workflow_run:
+    workflows:
+      - Bump beta version tag
+    types:
+      - completed
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*-beta.*"
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+  issues: read
+
+jobs:
+  prepare:
+    uses: git-mastery/actions/.github/workflows/get-latest-tag.yml@main
+    secrets: inherit
+
+  linux-build:
+    needs: prepare
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      ARCHITECTURE: ${{ matrix.arch }}
+      VERSION_NUMBER: ${{ needs.prepare.outputs.version_number }}
+      FILENAME: gitmastery-beta-${{ needs.prepare.outputs.version_number }}-linux-${{ matrix.arch }}
+      REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build binary
+        run: |
+          echo "__version__ = \"$REF_NAME\"" > app/version.py
+          uv run pyinstaller --onefile main.py --name $FILENAME
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.FILENAME }}
+          tag_name: ${{ env.REF_NAME }}
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish package as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.FILENAME }}
+          path: dist/${{ env.FILENAME }}
+
+  debian-build:
+    # We support both ARM64 and AMD64 since Debian comes with support for
+    # these two out of the box
+    needs: [prepare, linux-build]
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      ARCHITECTURE: ${{ matrix.arch }}
+      VERSION: ${{ needs.prepare.outputs.version_number }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          path: "app"
+          fetch-depth: 0
+
+      - name: Extract variables
+        env:
+          REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+        run: |
+          # Get the tag's commit message
+          cd app/
+          CHANGELOG_MESSAGE=$(git show ${REF_NAME} --no-patch --pretty=format:%s)
+          echo "CHANGELOG_MESSAGE=${CHANGELOG_MESSAGE}" >> $GITHUB_ENV
+
+      - name: Install Debian packaging tools
+        run: |
+          sudo apt-get install devscripts build-essential debhelper-compat
+
+      - name: Set package version
+        id: pkg
+        run: |
+          DEBIAN_VERSION=$(echo "${VERSION}" | sed 's/-beta\./~beta/g')
+          echo "debian_version=$DEBIAN_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create folder structure for ${{ env.ARCHITECTURE }} distribution
+        run: |
+          mkdir gitmastery-beta-${VERSION}-${ARCHITECTURE}
+
+      - name: Download ${{ env.ARCHITECTURE }} binaries from artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: gitmastery-beta-${{ env.VERSION }}-linux-${{ env.ARCHITECTURE }}
+          path: gitmastery-beta-${{ env.VERSION }}-${{ env.ARCHITECTURE }}/
+
+      - name: Create upstream tarball .orig.tar.gz
+        run: |
+          # Create .orig.tar.gz file
+          tar -czf gitmastery-beta_${{ steps.pkg.outputs.debian_version }}.orig.tar.gz gitmastery-beta-${VERSION}-${ARCHITECTURE}/gitmastery-beta-${VERSION}-linux-${ARCHITECTURE}
+
+      - name: Generate Debian packaging files
+        working-directory: gitmastery-beta-${{ env.VERSION }}-${{ env.ARCHITECTURE }}
+        # TODO: Update to something agnostic
+        env:
+          EMAIL: woojiahao1234@gmail.com
+          NAME: Jiahao, Woo
+        run: |
+          file gitmastery-beta-${VERSION}-linux-${ARCHITECTURE}
+          # Create the debian folder
+          mkdir debian
+
+          # Generate the changelog
+          # TODO: Maybe detect if major version change, then make it urgent
+
+          # Changing -beta. to ~beta for Debian semver handling
+          DEBIAN_VERSION=$(echo "${VERSION}" | sed 's/-beta\./~beta/g')
+          dch --create -v ${DEBIAN_VERSION}-1 -u low --package gitmastery-beta "$CHANGELOG_MESSAGE"
+
+          # Create the control file
+          # TODO: Maybe detect if major version change, then make it mandatory
+          echo """Source: gitmastery-beta
+          Maintainer: $NAME <$EMAIL>
+          Section: misc
+          Priority: optional
+          Standards-Version: 4.7.0
+          Build-Depends: debhelper-compat (= 13)
+
+          Package: gitmastery-beta
+          Architecture: ${ARCHITECTURE}
+          Depends: ${shlibs:Depends}, ${misc:Depends}, libc6 (>= 2.35), python3
+          Description: execute Git-Mastery
+            gitmastery-beta is a Git learning tool built by the National University of Singapore School of Computing
+          """ > debian/control
+
+          # Copy over the MIT license from the main app to this release
+          cat ../app/LICENSE > debian/copyright
+
+          mkdir debian/source
+          echo "3.0 (quilt)" > debian/source/format
+
+          # Provide the rules for installation, using -e to preserve the tab character as per:
+          # https://wiki.debian.org/Packaging/Intro
+          # $(DESTDIR) resolves to debian/binarypackage/ as seen in 
+          # https://www.debian.org/doc/manuals/debmake-doc/ch06.en.html#ftn.idp1797
+          echo -e $"""#!/usr/bin/make -f
+          %:
+          \tdh \$@
+          \n
+          override_dh_auto_install:
+          \tinstall -D -m 0755 gitmastery-beta-${VERSION}-linux-${ARCHITECTURE} debian/gitmastery-beta/usr/bin/gitmastery-beta
+          """ > debian/rules
+
+          echo """usr/bin
+          """ > debian/gitmastery-beta.dirs
+
+          mkdir -p debian/source
+          echo """gitmastery-beta-${VERSION}-linux-${ARCHITECTURE}
+          """ > debian/source/include-binaries
+
+          cat debian/rules
+
+          # Build the package
+          dpkg-buildpackage -us -uc -a ${ARCHITECTURE}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: gitmastery-beta_${{ steps.pkg.outputs.debian_version }}-1_${{ env.ARCHITECTURE }}.deb
+          tag_name: ${{ needs.prepare.outputs.ref_name }}
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  debian-publish-apt:
+    needs: [prepare, debian-build]
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    permissions: write-all
+    uses: git-mastery/gitmastery-beta-apt-repo/.github/workflows/debian-apt-repo-beta.yml@main
+    with:
+      version: ${{ needs.prepare.outputs.ref_name }}
+    secrets: inherit
+
+  arch-build:
+    needs: prepare
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    runs-on: ubuntu-latest
+
+    env:
+      ARCHITECTURE: amd64
+      VERSION_NUMBER: ${{ needs.prepare.outputs.version_number }}
+      FILENAME: gitmastery-beta-${{ needs.prepare.outputs.version_number }}-arch-amd64
+      REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Build binary
+        run: |
+          echo "__version__ = \"$REF_NAME\"" > app/version.py
+
+          docker run --rm \
+            -v $PWD:/pkg \
+            archlinux:base-devel \
+            bash -c "
+              pacman -Sy --noconfirm curl openssl git &&
+              curl -LsSf https://astral.sh/uv/install.sh | sh &&
+              export PATH=\"/root/.local/bin:\$PATH\" &&
+              cd /pkg &&
+              uv sync &&
+              uv run pyinstaller --onefile main.py --name $FILENAME --distpath /pkg/dist
+            "
+
+          # Fix file ownership after Docker run
+          sudo chown -R $(id -u):$(id -g) .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ env.FILENAME }}
+          tag_name: ${{ env.REF_NAME }}
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish package as artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.FILENAME }}
+          path: dist/${{ env.FILENAME }}
+
+  arch-publish:
+    # Since Arch linux currently only supports x86_64 out of the box, we will focus
+    # on supporting that first
+    needs: [prepare, arch-build]
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    runs-on: ubuntu-latest
+
+    env:
+      ARCHITECTURE: amd64
+      VERSION: ${{ needs.prepare.outputs.version_number }}
+
+    environment: Main
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+        with:
+          path: "app"
+          fetch-depth: 0
+
+      - name: Set environment variables
+        env:
+          REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+        run: |
+          # Get the tag's commit message
+          cd app/
+          CHANGELOG_MESSAGE=$(git show ${REF_NAME} --no-patch --pretty=format:%s)
+          echo "CHANGELOG_MESSAGE=${CHANGELOG_MESSAGE}" >> $GITHUB_ENV
+
+      - name: Setup SSH for Github Actions
+        env:
+          AUR_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${AUR_PRIVATE_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          # TODO: Maybe swap to a SoC specific account
+          git config --global user.name "Jiahao, Woo"
+          git config --global user.email "woojiahao1234@gmail.com"
+          git config --global init.defaultBranch master
+
+      - name: Create AUR package repository
+        run: git clone ssh://aur@aur.archlinux.org/gitmastery-beta-bin.git aur-pkg
+
+      - name: Publish to AUR
+        env:
+          RELEASE_AMD64_URL: https://github.com/git-mastery/app/releases/download/${{ needs.prepare.outputs.ref_name }}/gitmastery-beta-${{ env.VERSION }}-arch-amd64
+          REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+        run: |
+          cd aur-pkg
+
+          BINARY_NAME=gitmastery-beta-${VERSION}-linux-${ARCHITECTURE}
+          PKGVER=$(echo "$REF_NAME" | sed 's/-/_/g') # pkgver cannot have a hyphen (handles beta tags)
+
+          echo -e $"""$CHANGELOG_MESSAGE
+          \n""" >> gitmastery-beta.changelog
+          cat gitmastery-beta.changelog
+
+          echo """# Maintainer: Jiahao, Woo <woojiahao1234@gmail.com>
+          pkgname=gitmastery-beta-bin
+          pkgver=\"$PKGVER\"
+          pkgrel=1
+          pkgdesc=\"Git-Mastery CLI for practicing Git\"
+          arch=('x86_64')
+          url='https://github.com/git-mastery/app'
+          license=('MIT')
+          depends=(
+            'python'
+          )
+          changelog=\"gitmastery-beta.changelog\"
+          source=(\"${BINARY_NAME}::${RELEASE_AMD64_URL}\")
+          sha256sums=('SKIP')
+
+          package() {
+            install -D -m 0755 \"\$srcdir/$BINARY_NAME\" \"\$pkgdir/usr/bin/gitmastery-beta\"
+            chmod 755 \"\$pkgdir/usr/bin/gitmastery-beta\"
+          }
+          """ >> PKGBUILD
+          cat PKGBUILD
+
+          # Generate the .SRCINFO within a Docker container
+          # We attach the current directory (aur-pkg) as the pkg directory volume
+          docker run --rm \
+            -v $PWD:/pkg \
+            archlinux:base-devel \
+            bash -c "
+              pacman -Sy --noconfirm sudo git base-devel && \
+              useradd -m builder && \
+              echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers && \
+              chown -R builder:builder /pkg && \
+              su builder -c 'cd /pkg && makepkg --printsrcinfo > .SRCINFO'
+            "
+          # Fix file ownership after Docker run
+          sudo chown -R $(id -u):$(id -g) .
+
+          git add .
+          git commit -m "Update package"
+          git push --force
+
+  windows:
+    needs: prepare
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build binary
+        shell: pwsh
+        env:
+          REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+        run: |
+          $version_content = '__version__ = "{0}"' -f $env:REF_NAME
+          $version_content | Out-File -FilePath app/version.py -Encoding utf8
+          uv run pyinstaller --onefile --name gitmastery-beta main.py
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/gitmastery-beta.exe
+          tag_name: ${{ needs.prepare.outputs.ref_name }}
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  winget-publish:
+    needs: [prepare, windows]
+    if: needs.prepare.outputs.should_publish == 'true' && !contains(needs.prepare.outputs.ref_name, 'beta') # temporarily disable winget publishing 
+
+    runs-on: windows-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Submit to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: GitMastery.GitMasteryBeta
+          version: ${{ needs.prepare.outputs.version_number }}
+          release-tag: ${{ needs.prepare.outputs.ref_name }}
+          token: ${{ secrets.ORG_PAT }}
+          installers-regex: '\.exe$'
+
+  macos-build:
+    needs: prepare
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    # We use macos-15-intel since it's the latest image that currently supports AMD64
+    strategy:
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: amd64
+          - os: macos-latest
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+
+    outputs:
+      sha256-arm64: ${{ steps.checksum-arm64.outputs.sha256 }}
+      sha256-amd64: ${{ steps.checksum-amd64.outputs.sha256 }}
+
+    env:
+      ARCHITECTURE: ${{ matrix.arch }}
+      REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build binary
+        run: |
+          echo "__version__ = \"$REF_NAME\"" > app/version.py
+          uv run pyinstaller --onefile --name "gitmastery-beta-$ARCHITECTURE" main.py
+
+      - name: Generate SHA256 (amd64)
+        if: matrix.arch == 'amd64'
+        id: checksum-amd64
+        run: |
+          FILENAME=gitmastery-beta-amd64
+          SHA256=$(shasum -a 256 dist/$FILENAME | cut -d ' ' -f1)
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Generate SHA256 (arm64)
+        if: matrix.arch == 'arm64'
+        id: checksum-arm64
+        run: |
+          FILENAME=gitmastery-beta-arm64
+          SHA256=$(shasum -a 256 dist/$FILENAME | cut -d ' ' -f1)
+          echo "sha256=$SHA256" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/gitmastery-beta-${{ matrix.arch }}
+          tag_name: ${{ needs.prepare.outputs.ref_name }}
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  macos-publish:
+    needs: [prepare, macos-build]
+    if: needs.prepare.outputs.should_publish == 'true'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Update Homebrew Tap
+        env:
+          GH_TOKEN: ${{ secrets.ORG_PAT }}
+          REF_NAME: ${{ needs.prepare.outputs.ref_name }}
+          VERSION_NUMBER: ${{ needs.prepare.outputs.version_number }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/git-mastery/homebrew-gitmastery.git
+          cd homebrew-gitmastery
+
+          cat <<EOF > gitmastery-beta.rb
+          class GitmasteryBeta < Formula
+            desc "CLI tool for Git-Mastery"
+            homepage "https://github.com/git-mastery/cli"
+            version "$VERSION_NUMBER"
+
+            on_arm do
+              url "https://github.com/git-mastery/cli/releases/download/${REF_NAME}/gitmastery-beta-arm64"
+              sha256 "${{ needs.macos-build.outputs.sha256-arm64 }}"
+            end
+
+            on_intel do
+              url "https://github.com/git-mastery/cli/releases/download/${REF_NAME}/gitmastery-beta-amd64"
+              sha256 "${{ needs.macos-build.outputs.sha256-amd64 }}"
+            end
+
+            def install
+              if Hardware::CPU.arm?
+                chmod 0755, "gitmastery-beta-arm64"
+                bin.install "gitmastery-beta-arm64" => "gitmastery-beta"
+              else
+                chmod 0755, "gitmastery-beta-amd64"
+                bin.install "gitmastery-beta-amd64" => "gitmastery-beta"
+              end
+            end
+
+            test do
+              system "#{bin}/gitmastery-beta", "--help"
+            end
+          end
+          EOF
+
+          git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/git-mastery/homebrew-gitmastery.git
+          git remote -v
+          git add gitmastery-beta.rb
+          git commit -m "Update to ${REF_NAME}"
+          git push origin main
+
+  macos-test:
+    strategy:
+      matrix:
+        os: [macos-15-intel, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    needs: macos-publish
+
+    steps:
+      - run: |
+          brew tap git-mastery/gitmastery
+          brew install gitmastery-beta
+          file "$(brew --prefix)/bin/gitmastery-beta"
+          gitmastery-beta --help
