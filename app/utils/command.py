@@ -2,7 +2,7 @@ import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from subprocess import CompletedProcess
+from subprocess import CalledProcessError, CompletedProcess
 from typing import Dict
 
 from typing_extensions import List
@@ -21,6 +21,14 @@ class CommandResult:
     def stdout(self) -> str:
         return self.result.stdout.strip()
 
+    @property
+    def stderr(self) -> str:
+        return self.result.stderr.strip()
+
+    @property
+    def returncode(self) -> int:
+        return self.result.returncode
+
 
 def run(command: List[str], env: Dict[str, str] = {}) -> CommandResult:
     verbose = get_verbose()
@@ -34,29 +42,30 @@ def run(command: List[str], env: Dict[str, str] = {}) -> CommandResult:
             text=True,
             env=dict(os.environ, **env),
             encoding="utf-8",
+            check=True,
         )
     except FileNotFoundError:
         error_msg = f"Command not found: {command[0]}"
-        logger.error(error_msg)
         result = CompletedProcess(command, returncode=127, stdout="", stderr=error_msg)
     except PermissionError:
         error_msg = f"Permission denied: {command[0]}"
-        logger.error(error_msg)
         result = CompletedProcess(command, returncode=126, stdout="", stderr=error_msg)
     except OSError as e:
         error_msg = f"OS error when running command {command}: {e}"
-        logger.error(error_msg)
         result = CompletedProcess(command, returncode=1, stdout="", stderr=error_msg)
+    except CalledProcessError as e:
+        result = CompletedProcess(
+            command, returncode=e.returncode, stdout="", stderr=e.stderr
+        )
 
     if env:
         logger.info("Env: %s", env)
 
-    if verbose:
-        if result.returncode == 0:
-            logger.info(result.stdout)
-            print("\t" + result.stdout)
-        else:
-            logger.error(result.stderr)
-            print("\t" + result.stderr)
+    if result.returncode != 0:
+        logger.error(result.stderr)
+        print("\t" + result.stderr)
+    elif verbose:
+        logger.info(result.stdout)
+        print("\t" + result.stdout)
 
     return CommandResult(result=result)

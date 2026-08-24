@@ -26,7 +26,13 @@ from app.utils.click import (
     warn,
 )
 from app.utils.git import add_all, commit, push
-from app.utils.github_cli import close_prs, delete_repo, get_prs, get_username, pull_request
+from app.utils.github_cli import (
+    close_prs,
+    delete_repo,
+    get_prs,
+    get_username,
+    pull_request,
+)
 from app.utils.gitmastery import ExercisesRepo
 
 
@@ -113,17 +119,19 @@ def reset() -> None:
         f"Resetting your progress for {click.style(exercise_name, bold=True, italic=True)}"
     )
     clean_progress = []
+    is_updated = False
     with open("progress.json", "r") as progress_file:
         progress = json.load(progress_file)
         for entry in progress:
             if entry["exercise_name"] == exercise_name:
+                is_updated = True
                 continue
             clean_progress.append(entry)
 
     with open("progress.json", "w") as progress_file:
         progress_file.write(json.dumps(clean_progress, indent=2))
 
-    if has_remote_progress:
+    if has_remote_progress and is_updated:
         info("Updating your remote progress as well")
         add_all()
         commit(f"Reset progress for {exercise_name}")
@@ -138,6 +146,7 @@ def reset() -> None:
                 f"{username}:main",
                 f"[{username}] Progress",
                 "Automated",
+                exit_on_error=True,
             )
 
     success(

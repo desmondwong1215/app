@@ -57,7 +57,7 @@ def on() -> None:
         info("You already have a fork")
     else:
         warn("You don't have a fork yet, creating one")
-        fork(PROGRESS_REPOSITORY_NAME, fork_name)
+        fork(PROGRESS_REPOSITORY_NAME, fork_name, exit_on_error=True)
 
     os.chdir(config.path)
 
@@ -99,7 +99,8 @@ def on() -> None:
     # To reconcile the difference between local and remote progress, we merge by
     # (exercise_name, start_time) which should be unique
     remote_progress = []
-    if os.path.isfile(local_progress_filepath):
+    remote_has_progress_file = os.path.isfile(local_progress_filepath)
+    if remote_has_progress_file:
         with open(local_progress_filepath, "r") as file:
             remote_progress = json.load(file)
 
@@ -123,7 +124,7 @@ def on() -> None:
     # If we have seen more unique entries than what was stored remotely, we need to
     # push the changes
     had_update = len(seen) > len(remote_progress)
-    if had_update:
+    if had_update or not remote_has_progress_file:
         os.chdir(progress_dir)
         add_all()
         commit("Sync progress with local machine")
@@ -138,6 +139,7 @@ def on() -> None:
             f"{username}:main",
             f"[{username}] Progress",
             "Automated",
+            exit_on_error=True,
         )
 
     success("You have setup the progress tracker for Git-Mastery!")

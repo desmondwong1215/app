@@ -134,6 +134,7 @@ def _submit_progress(output: GitAutograderOutput) -> None:
                 f"{username}:main",
                 f"[{username}] Progress",
                 "Automated",
+                exit_on_error=True,
             )
 
     info("Updated your progress")

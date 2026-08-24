@@ -1,7 +1,27 @@
 import re
+import sys
 from typing import List, Optional
 
+from app.utils.click import error, get_verbose
 from app.utils.command import run
+
+
+def run_command(
+    command: List[str], env: dict = {}, exit_on_error: bool = False
+) -> None:
+    result = run(command, env)
+    if not result.is_success() and exit_on_error:
+        if get_verbose():
+            error_msg = f"Command failed: {' '.join(command)}\n" + "\n".join(
+                f"    {line}" for line in result.stderr.splitlines()
+            )
+        else:
+            error_msg = (
+                f"Command failed: {' '.join(command)}\n"
+                f"    Run with --verbose to see full output."
+            )
+        error(error_msg)
+        sys.exit(result.returncode)
 
 
 def is_github_cli_installed() -> bool:
@@ -71,7 +91,12 @@ def get_repo_https_url(repo: str) -> Optional[str]:
     return None
 
 
-def fork(repository_name: str, fork_name: str, all_branches: bool | None = False) -> None:
+def fork(
+    repository_name: str,
+    fork_name: str,
+    all_branches: bool | None = False,
+    exit_on_error: bool = False,
+) -> None:
     fork_command = [
         "gh",
         "repo",
@@ -80,25 +105,33 @@ def fork(repository_name: str, fork_name: str, all_branches: bool | None = False
         "--fork-name",
         fork_name,
     ]
-    if all_branches == None or not all_branches:
+    if all_branches is None or not all_branches:
         fork_command.append("--default-branch-only")
-    run(fork_command)
+    run_command(fork_command, exit_on_error=exit_on_error)
 
 
-def clone(repository_name: str) -> None:
-    run(["gh", "repo", "clone", repository_name])
+def clone(repository_name: str, exit_on_error: bool = False) -> None:
+    run_command(["gh", "repo", "clone", repository_name], exit_on_error=exit_on_error)
 
 
-def clone_with_custom_name(repository_name: str, name: str) -> None:
-    run(["gh", "repo", "clone", repository_name, name])
+def clone_with_custom_name(
+    repository_name: str, name: str, exit_on_error: bool = False
+) -> None:
+    run_command(
+        ["gh", "repo", "clone", repository_name, name], exit_on_error=exit_on_error
+    )
 
 
-def delete_repo(repository_name: str) -> None:
-    run(["gh", "repo", "delete", repository_name, "--yes"])
+def delete_repo(repository_name: str, exit_on_error: bool = False) -> None:
+    run_command(
+        ["gh", "repo", "delete", repository_name, "--yes"], exit_on_error=exit_on_error
+    )
 
 
-def pull_request(repo: str, base: str, head: str, title: str, body: str) -> None:
-    run(
+def pull_request(
+    repo: str, base: str, head: str, title: str, body: str, exit_on_error: bool = False
+) -> None:
+    run_command(
         [
             "gh",
             "pr",
@@ -114,6 +147,7 @@ def pull_request(repo: str, base: str, head: str, title: str, body: str) -> None
             "--body",
             body,
         ],
+        exit_on_error=exit_on_error,
     )
 
 

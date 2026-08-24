@@ -97,7 +97,11 @@ def _download_exercise(
                     warn("Setup Github and Github CLI before downloading this exercise")
                     sys.exit(1)
 
-        if old_config and old_config.exercise_repo.repo_type == "remote" and old_config.exercise_repo.create_fork:
+        if (
+            old_config
+            and old_config.exercise_repo.repo_type == "remote"
+            and old_config.exercise_repo.create_fork
+        ):
             pr_repo_full_name = old_config.exercise_repo.pr_repo_full_name
             if pr_repo_full_name:
                 info(f"Closing any open PRs in {pr_repo_full_name}...")
@@ -208,7 +212,10 @@ def setup_exercise_folder(
     with open(".gitmastery-exercise.json", "w") as gitmastery_exercise_file:
         gitmastery_exercise_file.write(config.to_json())
 
-    if config.exercise_repo.repo_type == "local" or config.exercise_repo.repo_type == "local-ignore":
+    if (
+        config.exercise_repo.repo_type == "local"
+        or config.exercise_repo.repo_type == "local-ignore"
+    ):
         info("Creating custom exercise folder")
         os.makedirs(config.exercise_repo.repo_name, exist_ok=True)
     elif config.exercise_repo.repo_type == "remote":
@@ -222,16 +229,25 @@ def setup_exercise_folder(
             fork_name = config.exercise_fork_name(username)
             if has_fork(fork_name):
                 info("You already have a fork, deleting it")
-                delete_repo(fork_name)
+                delete_repo(fork_name, exit_on_error=True)
             info("Creating fork of exercise repository")
-            fork(exercise_repo, fork_name, config.exercise_repo.fork_all_branches)
+            fork(
+                exercise_repo,
+                fork_name,
+                config.exercise_repo.fork_all_branches,
+                exit_on_error=True,
+            )
             info("Creating clone of your fork")
             clone_with_custom_name(
-                f"{username}/{fork_name}", config.exercise_repo.repo_name
+                f"{username}/{fork_name}",
+                config.exercise_repo.repo_name,
+                exit_on_error=True,
             )
         else:
             info("Creating clone of repository")
-            clone_with_custom_name(exercise_repo, config.exercise_repo.repo_name)
+            clone_with_custom_name(
+                exercise_repo, config.exercise_repo.repo_name, exit_on_error=True
+            )
 
     os.chdir(config.exercise_repo.repo_name)
     namespace = Namespace.load_file_as_namespace(
@@ -267,7 +283,9 @@ def setup_exercise_folder(
     verbose = get_verbose()
     # disable local initialization only if init is False, do not disable for remote repositories if set to null
     null_repo = config.exercise_repo.init is False
-    with create_repo_smith(verbose, existing_path=".", null_repo=null_repo) as repo_smith:
+    with create_repo_smith(
+        verbose, existing_path=".", null_repo=null_repo
+    ) as repo_smith:
         namespace.execute_function(
             "setup",
             {"rs": repo_smith, "verbose": verbose},
